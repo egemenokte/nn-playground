@@ -1,2 +1,2 @@
 # nn-playground
-neural network visualization
+neural network visualization inspired by tensorflow playground. 
