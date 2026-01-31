@@ -198,6 +198,7 @@ export default function App() {
   const [numPoints, setNumPoints] = useState(200);
   const [batchSize, setBatchSize] = useState(32);
   const [useBias, setUseBias] = useState(true);
+  const [tfBackend, setTfBackend] = useState('webgl');
   const [running, setRunning] = useState(false);
   const [epoch, setEpoch] = useState(0);
   const [trLoss, setTrLoss] = useState(null);
@@ -218,6 +219,20 @@ export default function App() {
   const configRef = useRef({ funcExpr, layers, activation, optimizer, lr, noise, trainRatio, numPoints, batchSize, useBias });
 
   useEffect(() => { configRef.current = { funcExpr, layers, activation, optimizer, lr, noise, trainRatio, numPoints, batchSize, useBias }; });
+
+  useEffect(() => {
+    const switchBackend = async () => {
+      try {
+        await tf.setBackend(tfBackend);
+        await tf.ready();
+        console.log('Switched to backend:', tf.getBackend());
+        reset();
+      } catch (e) {
+        console.error('Backend switch failed:', e);
+      }
+    };
+    switchBackend();
+  }, [tfBackend]);
 
   useEffect(() => { mountedRef.current = true; initAll(); return () => { mountedRef.current = false; cleanup(); }; }, []);
 
@@ -401,6 +416,15 @@ export default function App() {
             <div className="flex items-center gap-1 mb-0.5"><span className="w-3 h-0.5 bg-blue-500 rounded" /> Positive</div>
             <div className="flex items-center gap-1"><span className="w-3 h-0.5 bg-red-500 rounded" /> Negative</div>
             <div className="text-slate-500 mt-1">Thickness = magnitude</div>
+          </div>
+          <div className="pt-2 border-t border-slate-700">
+            <div className="text-slate-500 mb-2 text-xs italic">Slow performance? Try a different backend.</div>
+            <label className="text-slate-400">Backend:</label>
+            <select value={tfBackend} onChange={e => setTfBackend(e.target.value)} className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs mt-1">
+              <option value="webgl">WebGL (GPU)</option>
+              <option value="wasm">WASM</option>
+              <option value="cpu">CPU</option>
+            </select>
           </div>
         </div>
 
