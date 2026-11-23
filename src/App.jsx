@@ -13,6 +13,9 @@ const PRESETS = [
 ];
 const ACTIVATIONS = ['tanh', 'relu', 'sigmoid', 'linear'];
 const OPTIMIZERS = ['adam', 'sgd', 'rmsprop'];
+const REGULARIZATIONS = ['none', 'L1', 'L2'];
+const REG_RATES = [0, 0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10];
+const getRegularizer = (type, rate) => type === 'L1' ? tf.regularizers.l1({ l1: rate }) : type === 'L2' ? tf.regularizers.l2({ l2: rate }) : null;
 
 const evalFn = (expr, x) => { try { return math.evaluate(expr, { x }); } catch { return 0; } };
 
@@ -92,8 +95,10 @@ const DataPlot = ({ train, test, preds }) => {
   const W = 500, H = 452, pad = { t: 25, r: 20, b: 80, l: 45 };
   const pW = W - pad.l - pad.r, pH = H - pad.t - pad.b;
   if (!preds.length) return <svg width={W} height={H} className="bg-slate-900 rounded-lg" />;
-  const allY = [...train.map(d => d.y), ...test.map(d => d.y), ...preds.map(d => d.t), ...preds.map(d => d.p)];
-  const minY = Math.min(...allY), maxY = Math.max(...allY), yR = maxY - minY || 1;
+  // Y range comes from the data and true function only (not predictions), so the axes stay fixed during training
+  const allY = [...train.map(d => d.y), ...test.map(d => d.y), ...preds.map(d => d.t)].filter(isFinite);
+  const m = (Math.max(...allY) - Math.min(...allY)) * 0.1 || 1;
+  const minY = Math.min(...allY) - m, maxY = Math.max(...allY) + m, yR = maxY - minY;
   const sx = x => pad.l + ((x + 5) / 10) * pW;
   const sy = y => pad.t + pH - ((y - minY) / yR) * pH;
   let tp = '', pp = '';
@@ -111,7 +116,8 @@ const DataPlot = ({ train, test, preds }) => {
       {train.map((d, i) => <circle key={`tr${i}`} cx={sx(d.x)} cy={sy(d.y)} r={4} fill="#f97316" opacity={0.7} />)}
       {test.map((d, i) => <circle key={`te${i}`} cx={sx(d.x)} cy={sy(d.y)} r={4} fill="#22c55e" opacity={0.7} />)}
       <path d={tp} fill="none" stroke="#3b82f6" strokeWidth={2.5} />
-      <path d={pp} fill="none" stroke="#a855f7" strokeWidth={2.5} />
+      <clipPath id="plotArea"><rect x={pad.l} y={pad.t} width={pW} height={pH} /></clipPath>
+      <path d={pp} fill="none" stroke="#a855f7" strokeWidth={2.5} clipPath="url(#plotArea)" />
       <g transform={`translate(${W/2 - 140}, ${H - 22})`}>
         <circle cx={0} cy={0} r={4} fill="#f97316" /><text x={10} y={4} fill="#94a3b8" fontSize={10}>Train</text>
         <circle cx={65} cy={0} r={4} fill="#22c55e" /><text x={75} y={4} fill="#94a3b8" fontSize={10}>Test</text>
@@ -168,7 +174,7 @@ const LossPlot = ({ data, lockedScale }) => {
   
   return (
     <svg width={W} height={H} className="bg-slate-900 rounded-lg">
-      <text x={W/2} y={14} textAnchor="middle" fill="#94a3b8" fontSize={11}>Loss (log scale)</text>
+      <text x={W/2} y={14} textAnchor="middle" fill="#94a3b8" fontSize={11}>Loss: MSE (scaled), log scale</text>
       <line x1={pad.l} y1={pad.t + pH} x2={pad.l + pW} y2={pad.t + pH} stroke="#475569" />
       <line x1={pad.l} y1={pad.t} x2={pad.l} y2={pad.t + pH} stroke="#475569" />
       <text x={pad.l} y={H - 10} textAnchor="middle" fill="#64748b" fontSize={9}>0</text>
@@ -198,6 +204,8 @@ export default function App() {
   const [numPoints, setNumPoints] = useState(200);
   const [batchSize, setBatchSize] = useState(32);
   const [useBias, setUseBias] = useState(true);
+  const [regularization, setRegularization] = useState('none');
+  const [regRate, setRegRate] = useState(0.001);
   const [tfBackend, setTfBackend] = useState('webgl');
   const [running, setRunning] = useState(false);
   const [epoch, setEpoch] = useState(0);
@@ -216,9 +224,9 @@ export default function App() {
   const mountedRef = useRef(true);
   const sessionRef = useRef(0);
   const epochRef = useRef(0);
-  const configRef = useRef({ funcExpr, layers, activation, optimizer, lr, noise, trainRatio, numPoints, batchSize, useBias });
+  const configRef = useRef({ funcExpr, layers, activation, optimizer, lr, noise, trainRatio, numPoints, batchSize, useBias, regularization, regRate });
 
-  useEffect(() => { configRef.current = { funcExpr, layers, activation, optimizer, lr, noise, trainRatio, numPoints, batchSize, useBias }; });
+  useEffect(() => { configRef.current = { funcExpr, layers, activation, optimizer, lr, noise, trainRatio, numPoints, batchSize, useBias, regularization, regRate }; });
 
   useEffect(() => {
     const switchBackend = async () => {
@@ -241,7 +249,7 @@ export default function App() {
     if (!isPreset && funcExpr.trim()) setLastCustom(funcExpr);
   }, [funcExpr]);
 
-  useEffect(() => { reset(); }, [funcExpr, layers, activation, optimizer, noise, trainRatio, numPoints, batchSize, useBias]);
+  useEffect(() => { reset(); }, [funcExpr, layers, activation, optimizer, noise, trainRatio, numPoints, batchSize, useBias, regularization, regRate]);
 
   const cleanup = () => {
     runningRef.current = false;
@@ -287,9 +295,10 @@ export default function App() {
     };
 
     const m = tf.sequential();
-    m.add(tf.layers.dense({ units: cfg.layers[0], inputShape: [1], activation: cfg.activation, kernelInitializer: tf.initializers.glorotNormal({ seed: Date.now() % 1000 }), useBias: cfg.useBias }));
-    for (let i = 1; i < cfg.layers.length; i++) m.add(tf.layers.dense({ units: cfg.layers[i], activation: cfg.activation, kernelInitializer: tf.initializers.glorotNormal({ seed: (Date.now() + i) % 1000 }), useBias: cfg.useBias }));
-    m.add(tf.layers.dense({ units: 1, activation: 'linear', kernelInitializer: tf.initializers.glorotNormal({ seed: (Date.now() + 99) % 1000 }), useBias: cfg.useBias }));
+    const reg = () => cfg.regRate > 0 ? getRegularizer(cfg.regularization, cfg.regRate) : null;
+    m.add(tf.layers.dense({ units: cfg.layers[0], inputShape: [1], activation: cfg.activation, kernelInitializer: tf.initializers.glorotNormal({ seed: Date.now() % 1000 }), useBias: cfg.useBias, kernelRegularizer: reg() }));
+    for (let i = 1; i < cfg.layers.length; i++) m.add(tf.layers.dense({ units: cfg.layers[i], activation: cfg.activation, kernelInitializer: tf.initializers.glorotNormal({ seed: (Date.now() + i) % 1000 }), useBias: cfg.useBias, kernelRegularizer: reg() }));
+    m.add(tf.layers.dense({ units: 1, activation: 'linear', kernelInitializer: tf.initializers.glorotNormal({ seed: (Date.now() + 99) % 1000 }), useBias: cfg.useBias, kernelRegularizer: reg() }));
     m.compile({ optimizer: getOptimizer(cfg.optimizer, cfg.lr), loss: 'meanSquaredError' });
     modelRef.current = m;
 
@@ -324,7 +333,9 @@ export default function App() {
         const res = await modelRef.current.fit(dataRef.current.trX, dataRef.current.trY, { epochs: 10, batchSize: cfg.batchSize, shuffle: true, verbose: 0 });
         if (!runningRef.current || sid !== sessionRef.current || !mountedRef.current) return;
 
-        const tl = res.history.loss[res.history.loss.length - 1];
+        // fit()'s loss includes the regularization penalty; evaluate() gives plain MSE, comparable with test loss
+        const trEv = modelRef.current.evaluate(dataRef.current.trX, dataRef.current.trY);
+        const tl = trEv.dataSync()[0]; trEv.dispose();
         let vl = null;
         if (dataRef.current.teX) { const ev = modelRef.current.evaluate(dataRef.current.teX, dataRef.current.teY); vl = ev.dataSync()[0]; ev.dispose(); }
 
@@ -349,7 +360,7 @@ export default function App() {
       } catch (e) { console.log('Training error:', e); runningRef.current = false; setRunning(false); }
     };
     step();
-  }, [running, lockedScale]);
+  }, [running]); // not lockedScale: re-running this effect would start a second, overlapping fit() loop
 
   const reset = () => { setRunning(false); runningRef.current = false; setTimeout(initAll, 50); };
   const updateLr = v => { setLr(v); if (modelRef.current) modelRef.current.compile({ optimizer: getOptimizer(configRef.current.optimizer, v), loss: 'meanSquaredError' }); };
@@ -375,8 +386,8 @@ export default function App() {
           <span className="text-slate-400">Epoch: <span className="text-white font-mono">{epoch}</span></span>
         </div>
         <div className="h-5 w-px bg-slate-700" />
-        <span className="text-orange-400 text-xs">Train: {trLoss?.toFixed(5) ?? '—'}</span>
-        <span className="text-green-400 text-xs">Test: {teLoss?.toFixed(5) ?? '—'}</span>
+        <span className="text-orange-400 text-xs">Train MSE: {trLoss?.toFixed(5) ?? '—'}</span>
+        <span className="text-green-400 text-xs">Test MSE: {teLoss?.toFixed(5) ?? '—'}</span>
         <div className="h-5 w-px bg-slate-700" />
         <span className="text-slate-400 text-xs">LR:</span>
         <input type="range" min={-4} max={-1} step={0.1} value={Math.log10(lr)} onChange={e => updateLr(Math.pow(10, +e.target.value))} className="w-16 accent-blue-500" />
@@ -388,6 +399,14 @@ export default function App() {
         <span className="text-slate-400 text-xs">Optimizer:</span>
         <select value={optimizer} onChange={e => setOptimizer(e.target.value)} className="bg-slate-700 rounded px-1 py-0.5 text-xs">
           {OPTIMIZERS.map(o => <option key={o} value={o}>{o.toUpperCase()}</option>)}
+        </select>
+        <span className="text-slate-400 text-xs">Regularization:</span>
+        <select value={regularization} onChange={e => setRegularization(e.target.value)} className="bg-slate-700 rounded px-1 py-0.5 text-xs">
+          {REGULARIZATIONS.map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <span className="text-slate-400 text-xs">Reg. rate:</span>
+        <select value={regRate} onChange={e => setRegRate(+e.target.value)} disabled={regularization === 'none'} className="bg-slate-700 rounded px-1 py-0.5 text-xs disabled:opacity-50">
+          {REG_RATES.map(r => <option key={r} value={r}>{r}</option>)}
         </select>
       </div>
 
